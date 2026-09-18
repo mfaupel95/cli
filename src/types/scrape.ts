@@ -23,6 +23,7 @@ export interface ScrapeLocation {
 }
 
 export interface ScrapeOptions {
+  domainTools?: boolean;
   /** URL to scrape */
   url: string;
   /** Output format(s) - single format or array of formats */
@@ -53,6 +54,8 @@ export interface ScrapeOptions {
   timing?: boolean;
   /** Maximum age of cached content in milliseconds (API-level caching) */
   maxAge?: number;
+  /** Maximum number of PDF pages to parse */
+  maxPages?: number;
   /** Location settings for geo-targeted scraping */
   location?: ScrapeLocation;
   /** Question to ask about the page content (query format) */

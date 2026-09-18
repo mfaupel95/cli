@@ -4,10 +4,11 @@
 
 import type { ScrapeFormat } from './scrape';
 
-export type SearchSource = 'web' | 'images' | 'news';
+export type SearchSource = 'web' | 'images' | 'news' | 'alexandria';
 export type SearchCategory = 'github' | 'research' | 'pdf' | 'developer';
 
 export interface SearchOptions {
+  domainTools?: boolean;
   /** Search query (required) */
   query: string;
   /** API key for Firecrawl */
@@ -16,7 +17,7 @@ export interface SearchOptions {
   apiUrl?: string;
   /** Maximum number of results (default: 5, max: 100) */
   limit?: number;
-  /** Sources to search: web, images, news (default: web) */
+  /** Sources to search: web, images, news, alexandria (CLI default: web,alexandria) */
   sources?: SearchSource[];
   /** Categories to filter results: github, research, pdf, developer */
   categories?: SearchCategory[];
@@ -112,6 +113,7 @@ export interface DeveloperSearchResult {
 }
 
 export interface SearchResultData {
+  tools?: Record<string, unknown>[];
   web?: WebSearchResult[];
   images?: ImageSearchResult[];
   news?: NewsSearchResult[];

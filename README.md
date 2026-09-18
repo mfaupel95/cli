@@ -20,6 +20,25 @@ npx -y firecrawl-cli@latest init -y --browser
 - `--browser` opens the browser for Firecrawl authentication automatically
 - skills install globally to every detected AI coding agent by default
 
+### Alexandria beta: browse tools
+
+Use the Alexandria beta with your existing Firecrawl login or API key:
+
+```bash
+npx firecrawl-cli@alexandria alexandria list          # introduction and live categories
+npx firecrawl-cli@alexandria list --providers         # flat provider list
+npx firecrawl-cli@alexandria list finance             # providers in a category
+npx firecrawl-cli@alexandria list benzinga            # provider's tools
+npx firecrawl-cli@alexandria list-tools benzinga      # same browsing interface
+npx firecrawl-cli@alexandria list benzinga <capability> --json
+```
+
+The category overview is available in `1.23.4-alexandria-beta.9` onward. `list` and `list-tools` are interchangeable, including under `firecrawl alexandria`. The root explains how to find and call tools and lists live category descriptions. Choose a category to see its providers, or jump directly to a provider. Selecting a capability reveals its inputs, response, examples, and price. Browsable results expose next commands in JSON; the text guide explains how to select each category. Selecting a capability displays the final contract. Generated commands use `firecrawl`; when using `npx`, replace that prefix with `npx firecrawl-cli@alexandria`.
+
+Discovery is free and never executes the listed tools. The root reads `GET /exchange/discover` on the configured Firecrawl API using your existing credentials; provider and tool lookups use the Find Tools meta tool through Scrape. Category membership and descriptions stay on the server. The root shows all returned categories; `--limit` controls provider/tool page size (default 20, maximum 100). Follow `More` to continue a page. Root `--json` exposes categories at `data.items`; provider/tool JSON keeps the Scrape envelope at `data.alexandria[0].data`. Both include request IDs and navigation where available.
+
+Provider IDs take precedence over category IDs; use `--category` to select a category explicitly. Display names such as `retail`, `developer`, and `public-records` also resolve to their catalog category IDs. Follow a provider with a complete capability ID, such as `calendar/ratings`, to inspect its contract. Use `firecrawl search --sources alexandria` to find tools by task, or `firecrawl find-tools` for URL lookup and raw catalog selectors.
+
 ### Setup Skills, Workflows, and MCP
 
 If you are using an AI coding agent like Claude Code, you can also install skill groups manually — one command per family:
@@ -995,3 +1014,49 @@ firecrawl setup workflows
 ## Documentation
 
 For more details, visit the [Firecrawl Documentation](https://docs.firecrawl.dev).
+
+### Alexandria tool shorthand
+
+Use a provider/capability in place of a URL. The explicit `--alexandria` form remains supported:
+
+```bash
+firecrawl scrape benzinga/news/search --options '{"pageSize":10}'
+firecrawl scrape firecrawl-research-index/read --options '{"paperId":"123","query":"methodology","k":4}'
+firecrawl scrape --alexandria benzinga/news/search --options '{"pageSize":10}'
+firecrawl scrape https://example.com
+```
+
+URLs (including domains, IP addresses and localhost) continue to scrape websites. Tool addresses go directly to Alexandria, which validates the provider and capability; they never fall back to URL scraping. There is no extra catalog lookup. Bare names such as `firecrawl scrape amazon` fail locally with a suggested website URL and directions to `firecrawl list`. Suggestions are not verified or executed. Mixing URLs and tools in one command is rejected.
+
+### Alexandria provider terms (beta)
+
+When a provider returns `THIRD_PARTY_DATA_TERMS_REQUIRED`, review its linked terms.
+Read the current provider agreement and metadata with:
+
+```bash
+npx firecrawl-cli@alexandria alexandria terms show benzinga --pretty
+```
+
+After reviewing it, explicitly accept the exact version and digest for the organization
+associated with your Firecrawl API key:
+
+```bash
+npx firecrawl-cli@alexandria alexandria terms accept benzinga \
+  --terms-version '<reviewed-version>' --digest '<reviewed-sha256>' --confirm
+```
+
+This posts to `/exchange/provider-terms/accept`. No automatic acceptance or retry
+occurs. A `409 terms_changed` requires reviewing the new agreement before retrying.
+Agents must present the returned terms and provider links, ask the user for explicit
+approval, and wait before accepting. If review is refused or a provider link is
+unavailable, show the error and direct an organization admin to
+https://www.firecrawl.dev/app/settings?tab=data-sources. Never infer consent from a
+failed lookup or automatically retry an acceptance. The API remains authoritative
+for organization access and acceptance authority.
+After confirmed success, rerun the original provider command; its normal credits apply.
+
+### Alexandria receipts and retries
+
+Alexandria execution JSON includes an additive `receipt`: `creditsUsed` is actual reported usage (missing means unknown), `requestId` is the client idempotency identity, and `operationId`/`operationType` identify the server scrape. Existing response fields remain available. IDs, reported credits, and available retry delays print to stderr.
+
+Use the same request ID to recover pending or uncertain execution. Completed results, including failures, replay under the same ID; a deliberate new execution needs a new ID and may charge again. Never automatically rotate an uncertain ID. Structured failures preserve available status, code, action and retry metadata.
