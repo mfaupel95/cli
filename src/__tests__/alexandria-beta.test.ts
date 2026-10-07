@@ -51,7 +51,11 @@ beforeEach(() => {
   };
 });
 
-async function cli(args: string[], key = 'fc-test') {
+async function cli(
+  args: string[],
+  key = 'fc-test',
+  extraEnv: Record<string, string> = {}
+) {
   try {
     return {
       code: 0,
@@ -64,6 +68,7 @@ async function cli(args: string[], key = 'fc-test') {
           FIRECRAWL_API_KEY: key,
           FIRECRAWL_API_URL: baseUrl,
           FIRECRAWL_NO_UPDATE_CHECK: '1',
+          ...extraEnv,
         },
       })),
     };
@@ -255,6 +260,53 @@ it('expands only a selected tool without falling back to a group', async () => {
   expect(requests).toHaveLength(4);
 });
 
+it('inspects a combined tool address in one request and preserves provider errors', async () => {
+  response = catalogue('tools', [
+    {
+      id: 'pizzahut-com/restaurants/store',
+      provider: 'pizzahut-com',
+      capability: 'restaurants/store',
+      options: { store_number: { type: 'string' } },
+    },
+  ]);
+  const result = await cli([
+    'list',
+    'pizzahut-com/restaurants/store',
+    '--json',
+  ]);
+  expect(result.code).toBe(0);
+  expect(requests).toHaveLength(1);
+  expect(requests[0].body.alexandria[0].options).toEqual({
+    providers: ['pizzahut-com'],
+    capabilities: ['restaurants/store'],
+    level: 'tools',
+    expand: ['options', 'response', 'examples'],
+    limit: 20,
+  });
+  expect(result.stdout).toContain('store_number');
+  response = {
+    success: true,
+    data: {
+      creditsCost: 0,
+      alexandria: [
+        {
+          provider: 'firecrawl',
+          capability: 'find-tools',
+          error: {
+            code: 'unknown_provider',
+            message: 'Unknown provider',
+            status: 404,
+          },
+        },
+      ],
+    },
+  };
+  const missing = await cli(['list', 'missing/restaurants/store', '--json']);
+  expect(missing.code).not.toBe(0);
+  expect(requests).toHaveLength(2);
+  expect(missing.stdout).toContain('unknown_provider');
+});
+
 it('preserves scoped next requests, pagination and discovery receipts', async () => {
   const next = {
     provider: 'firecrawl',
@@ -368,7 +420,12 @@ it('documents the default discovery flow and respects explicit web-only search',
   const scrapeHelp = await cli(['scrape', '--help']);
   expect(scrapeHelp.stdout).toContain('--alexandria');
   const findHelp = await cli(['find-tools', '--help']);
-  expect(findHelp.stdout).toContain('meta tool');
+  expect(findHelp.code).toBe(0);
+  const findHelpText = findHelp.stdout.replace(/\s+/g, ' ');
+  expect(findHelpText).toContain(
+    'Match URLs or use --options for semantic queries'
+  );
+  expect(findHelpText).toContain('discovery does not execute providers');
   const agentHelp = await cli(['agent', '--help']);
   expect(agentHelp.stdout).toContain('--thread <threadId>');
   expect(agentHelp.stdout).toContain('--mode <mode>');
@@ -414,7 +471,7 @@ it('preserves mixed search results, tools and billing metadata', async () => {
   expect(readable.stdout).toContain('=== Alexandria Tools ===');
   expect(readable.stdout).toContain('series/observations');
   expect(readable.stdout).toContain(
-    'Inspect: npx firecrawl-cli@alexandria list fred/series/observations --json'
+    'Inspect: firecrawl list <provider> <capability> --pretty'
   );
 });
 
@@ -608,7 +665,12 @@ it('presents tools compactly after web results while JSON preserves full contrac
       tools: [tool],
     },
   };
-  const readable = await cli(['search', 'GDP growth']);
+  const readable = await cli([
+    'search',
+    'GDP growth',
+    '--tool-detail',
+    'summary',
+  ]);
   expect(readable.stdout.indexOf('GDP report')).toBeLessThan(
     readable.stdout.indexOf('=== Alexandria Tools ===')
   );
@@ -617,6 +679,24 @@ it('presents tools compactly after web results while JSON preserves full contrac
   expect(readable.stdout).not.toContain('EXAMPLE_PAYLOAD');
   const json = await cli(['search', 'GDP growth', '--json']);
   expect(JSON.parse(json.stdout).data.tools).toEqual([tool]);
+  response.data.tools = [
+    {
+      provider: tool.provider,
+      capability: tool.capability,
+      description: tool.description,
+      creditsCost: tool.creditsCost,
+      perRecord: tool.perRecord,
+    },
+  ];
+  const compact = await cli(['search', 'GDP growth']);
+  expect(compact.stdout).toContain('fred/series/observations');
+  expect(compact.stdout).toContain(tool.description);
+  expect(compact.stdout).toContain(
+    'Inspect: firecrawl list <provider> <capability> --pretty'
+  );
+  expect(compact.stdout).not.toContain('Cost:');
+  expect(requests.at(-1)?.body.toolDetail).toBe('compact');
+  expect(compact.stdout).toContain(`${tool.description}\n\nInspect:`);
   expect(requests.every((request) => request.url === '/v2/search')).toBe(true);
 });
 
@@ -642,6 +722,174 @@ it('find-tools and explicit meta-tool execution use the same Scrape request', as
   expect(requests).toHaveLength(2);
   expect(requests[0]).toEqual(requests[1]);
   expect(requests[0].url).toBe('/v2/scrape');
+});
+
+it('accepts the HTTP contract object form for --alexandria and rejects malformed addresses locally', async () => {
+  const object = await cli([
+    'scrape',
+    '--alexandria',
+    '{"provider":"benzinga","capability":"news/search","options":{"pageSize":1}}',
+    '--request-id',
+    'object-1',
+  ]);
+  expect(object.code).toBe(0);
+  const bare = await cli([
+    'scrape',
+    '--alexandria',
+    'benzinga/news/search',
+    '--options',
+    '{"pageSize":1}',
+    '--request-id',
+    'object-1',
+  ]);
+  expect(bare.code).toBe(0);
+  expect(requests).toHaveLength(2);
+  expect(requests[0]).toEqual(requests[1]);
+  expect(requests[0].body.alexandria).toEqual([
+    {
+      provider: 'benzinga',
+      capability: 'news/search',
+      options: { pageSize: 1 },
+    },
+  ]);
+  const separate = await cli([
+    'scrape',
+    '--alexandria',
+    '{"provider":"benzinga","capability":"news/search"}',
+    '--options',
+    '{"pageSize":2}',
+  ]);
+  expect(separate.code).toBe(0);
+  expect(requests[2].body.alexandria[0].options).toEqual({ pageSize: 2 });
+  for (const address of [
+    '{"provider":"benzinga"}',
+    '{"provider":"benzinga","capability":"news/search","extra":1}',
+    '{not json',
+    'benzinga',
+  ]) {
+    const result = await cli(['scrape', '--alexandria', address]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('provider/capability');
+  }
+  const both = await cli([
+    'scrape',
+    '--alexandria',
+    '{"provider":"benzinga","capability":"news/search","options":{}}',
+    '--options',
+    '{}',
+  ]);
+  expect(both.code).toBe(1);
+  expect(both.stderr).toContain('not both');
+  expect(requests).toHaveLength(3);
+});
+
+it('accepts the comma-separated expand form documented in find-tools --help', async () => {
+  const help = await cli(['find-tools', '--help']);
+  expect(help.stdout.replace(/\s+/g, ' ')).toContain(
+    'expand: ["options","response","examples"]'
+  );
+  expect(
+    (
+      await cli([
+        'find-tools',
+        '--options',
+        '{"providers":"fred","expand":"options, response,examples"}',
+      ])
+    ).code
+  ).toBe(0);
+  expect(
+    (
+      await cli([
+        'find-tools',
+        '--options',
+        '{"providers":["fred"],"expand":["options","response","examples"]}',
+      ])
+    ).code
+  ).toBe(0);
+  expect(
+    (
+      await cli([
+        'scrape',
+        '--alexandria',
+        'firecrawl/find-tools',
+        '--options',
+        '{"providers":"fred","expand":"options,response,examples"}',
+      ])
+    ).code
+  ).toBe(0);
+  expect(requests).toHaveLength(3);
+  for (const request of requests)
+    expect(request.body.alexandria[0].options).toEqual({
+      providers: ['fred'],
+      expand: ['options', 'response', 'examples'],
+    });
+});
+
+it('never comma-splits urls, which may legally contain commas', async () => {
+  const url = 'https://example.com/items,23?ids=1,2';
+  expect(
+    (
+      await cli([
+        'find-tools',
+        '--options',
+        JSON.stringify({ urls: url, providers: 'fred,benzinga' }),
+      ])
+    ).code
+  ).toBe(0);
+  expect(
+    (
+      await cli([
+        'find-tools',
+        '--request',
+        JSON.stringify({
+          provider: 'firecrawl',
+          capability: 'find-tools',
+          options: { urls: url, providers: 'fred,benzinga' },
+        }),
+      ])
+    ).code
+  ).toBe(0);
+  expect(
+    (
+      await cli([
+        'scrape',
+        '--alexandria',
+        'firecrawl/find-tools',
+        '--options',
+        JSON.stringify({ urls: [url], providers: 'fred,benzinga' }),
+      ])
+    ).code
+  ).toBe(0);
+  expect(requests).toHaveLength(3);
+  for (const request of requests)
+    expect(request.body.alexandria[0].options).toEqual({
+      urls: [url],
+      providers: ['fred', 'benzinga'],
+    });
+});
+
+it('trims whitespace around the slash in bare addresses and rejects empty parts', async () => {
+  const padded = await cli([
+    'scrape',
+    '--alexandria',
+    ' benzinga / news/search ',
+    '--options',
+    '{"pageSize":1}',
+  ]);
+  expect(padded.code).toBe(0);
+  expect(requests[0].body.alexandria).toEqual([
+    {
+      provider: 'benzinga',
+      capability: 'news/search',
+      options: { pageSize: 1 },
+    },
+  ]);
+  for (const address of ['benzinga/ ', ' /news', '/', 'benzinga/']) {
+    const result = await cli(['scrape', '--alexandria', address]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('provider/capability');
+  }
+  expect(requests).toHaveLength(1);
 });
 
 it('discovers a known URL and follows its returned meta-tool request without executing providers', async () => {
@@ -821,6 +1069,261 @@ it('rejects a malformed --thread before calling the API', async () => {
   expect(requests).toHaveLength(0);
 });
 
+const APPROVAL_ID = '3f2a1b0c-9d8e-4f7a-8b6c-5d4e3f2a1b0c';
+
+it('maps the Alexandria flags onto the exchange object', async () => {
+  response = { success: true, id: RUN_ID, threadId: THREAD_ID, threadTurn: 2 };
+  const approve = await cli([
+    'agent',
+    'Go ahead.',
+    '--thread',
+    THREAD_ID,
+    '--mode',
+    'chat',
+    '--alexandria',
+    '--toolkits',
+    'apollo, crunchbase',
+    '--max-calls',
+    '8',
+    '--require-approval',
+    '--approve',
+    APPROVAL_ID,
+    '--call-ids',
+    'call-1,call-2',
+    '--always',
+    '--on-terms-required',
+    'ask',
+  ]);
+  expect(approve.code).toBe(0);
+  expect(requests[0].body.exchange).toEqual({
+    enabled: true,
+    toolkits: ['apollo', 'crunchbase'],
+    maxCalls: 8,
+    requireApproval: true,
+    approve: {
+      approvalId: APPROVAL_ID,
+      callIds: ['call-1', 'call-2'],
+      always: true,
+    },
+    onTermsRequired: 'ask',
+  });
+
+  const decline = await cli([
+    'agent',
+    'Never mind.',
+    '--thread',
+    THREAD_ID,
+    '--decline',
+    APPROVAL_ID,
+    '--no-alexandria',
+  ]);
+  expect(decline.code).toBe(0);
+  expect(requests[1].body.exchange).toEqual({
+    enabled: false,
+    decline: { approvalId: APPROVAL_ID },
+  });
+});
+
+it('sends no exchange without an Alexandria flag', async () => {
+  response = { success: true, id: RUN_ID, threadId: THREAD_ID, threadTurn: 2 };
+  const result = await cli([
+    'agent',
+    'And the heading?',
+    '--thread',
+    THREAD_ID,
+    '--mode',
+    'chat',
+  ]);
+  expect(result.code).toBe(0);
+  expect(requests[0].body).not.toHaveProperty('exchange');
+});
+
+it('rejects Alexandria flags the API cannot honor before calling it', async () => {
+  const both = await cli([
+    'agent',
+    'Go ahead.',
+    '--thread',
+    THREAD_ID,
+    '--approve',
+    APPROVAL_ID,
+    '--decline',
+    APPROVAL_ID,
+  ]);
+  expect(both.code).toBe(1);
+  expect(both.stderr).toContain('use --approve or --decline, not both');
+
+  const alwaysWithoutApprove = await cli([
+    'agent',
+    'Keep going.',
+    '--thread',
+    THREAD_ID,
+    '--always',
+  ]);
+  expect(alwaysWithoutApprove.code).toBe(1);
+  expect(alwaysWithoutApprove.stderr).toContain(
+    '--call-ids and --always only apply with --approve'
+  );
+
+  const declineWithCallIds = await cli([
+    'agent',
+    'Never mind.',
+    '--thread',
+    THREAD_ID,
+    '--decline',
+    APPROVAL_ID,
+    '--call-ids=',
+  ]);
+  expect(declineWithCallIds.code).toBe(1);
+  expect(declineWithCallIds.stderr).toContain(
+    '--call-ids and --always only apply with --approve'
+  );
+
+  const noThread = await cli(['agent', 'Go ahead.', '--decline', APPROVAL_ID]);
+  expect(noThread.code).toBe(1);
+  expect(noThread.stderr).toContain('pass that thread with --thread');
+
+  const noChat = await cli(['agent', 'Find contacts.', '--require-approval']);
+  expect(noChat.code).toBe(1);
+  expect(noChat.stderr).toContain('--require-approval needs --mode chat');
+
+  for (const value of ['12o', '0', '31', '2.5']) {
+    const maxCalls = await cli([
+      'agent',
+      'Find contacts.',
+      '--max-calls',
+      value,
+    ]);
+    expect(maxCalls.code).toBe(1);
+    expect(maxCalls.stderr).toContain(
+      '--max-calls must be a whole number from 1 to 30'
+    );
+  }
+
+  const toolkits = await cli([
+    'agent',
+    'Find contacts.',
+    '--toolkits',
+    'a,b,c,d,e,f',
+  ]);
+  expect(toolkits.code).toBe(1);
+  expect(toolkits.stderr).toContain(
+    '--toolkits takes at most 5 provider slugs'
+  );
+  expect(requests).toHaveLength(0);
+});
+
+it('shows a pending approval and how to answer it', async () => {
+  const approvalStatus = {
+    success: true,
+    status: 'completed',
+    expiresAt: '2026-09-17T00:00:00.000Z',
+    creditsUsed: 4,
+    threadId: THREAD_ID,
+    threadTurn: 1,
+    mode: 'chat',
+    message: 'I need your approval for one paid lookup.',
+    pendingApproval: {
+      id: APPROVAL_ID,
+      kind: 'calls',
+      reason: 'Look up the company in a paid provider.',
+      calls: [
+        {
+          id: 'call-1',
+          provider: 'apollo',
+          capability: 'organizations/enrich',
+          input: { domain: 'example.com' },
+          creditsEstimate: 3,
+        },
+      ],
+      resolution: null,
+    },
+    exchange: {
+      enabled: true,
+      toolkits: ['apollo'],
+      requireApproval: true,
+      paidCalls: 0,
+      creditsUsed: 0,
+      skippedProviders: [
+        {
+          provider: 'crunchbase',
+          name: 'Crunchbase',
+          reason: 'terms_required',
+          version: '1',
+          termsUrl: 'https://example.com/terms/crunchbase',
+        },
+      ],
+    },
+  };
+  runThenPoll(approvalStatus);
+  const args = [
+    'agent',
+    'Find the company size.',
+    '--mode',
+    'chat',
+    '--toolkits',
+    'apollo',
+    '--require-approval',
+    '--wait',
+    '--poll-interval',
+    '0.01',
+  ];
+  const readable = await cli(args);
+  expect(readable.code).toBe(0);
+  expect(requests[0].body.exchange).toEqual({
+    toolkits: ['apollo'],
+    requireApproval: true,
+  });
+  expect(readable.stdout).toContain('Alexandria: 0 paid calls, 0 credits');
+  expect(readable.stdout).toContain(
+    '  - Crunchbase: https://example.com/terms/crunchbase'
+  );
+  expect(readable.stdout).toContain(
+    `Pending approval ${APPROVAL_ID}: Look up the company in a paid provider.`
+  );
+  expect(readable.stdout).toContain(
+    '  - call-1: apollo/organizations/enrich (~3 credits)'
+  );
+  for (const answer of ['--approve', '--decline']) {
+    expect(readable.stdout).toContain(
+      `firecrawl agent "<follow-up prompt>" --thread ${THREAD_ID} --mode chat ${answer} ${APPROVAL_ID}`
+    );
+  }
+
+  const json = await cli([...args, '--json']);
+  expect(JSON.parse(json.stdout)).toMatchObject({
+    pendingApproval: approvalStatus.pendingApproval,
+    exchange: approvalStatus.exchange,
+  });
+
+  response = {
+    ...approvalStatus,
+    pendingApproval: {
+      id: APPROVAL_ID,
+      kind: 'terms',
+      reason: 'Crunchbase needs its data terms accepted.',
+      calls: [],
+      terms: [
+        {
+          provider: 'crunchbase',
+          name: 'Crunchbase',
+          version: '1',
+          digest: null,
+          url: 'https://example.com/terms/crunchbase',
+        },
+      ],
+      resolution: null,
+    },
+  };
+  responseFor = undefined;
+  const terms = await cli(['agent', RUN_ID]);
+  expect(terms.stdout).toContain('Approving does not accept terms.');
+  expect(terms.stdout).toContain(
+    '  - Crunchbase: https://example.com/terms/crunchbase'
+  );
+  expect(terms.stdout).toContain('firecrawl alexandria terms show crunchbase');
+  expect(terms.stdout).toContain(`--approve ${APPROVAL_ID}`);
+});
+
 it('surfaces chat replies and thread position on status', async () => {
   response = {
     success: true,
@@ -852,6 +1355,238 @@ it('surfaces chat replies and thread position on status', async () => {
   expect(readable.stdout).toContain('Mode: chat');
   expect(readable.stdout).toContain('The page is about example domains.');
   expect(readable.stdout).toContain('Dig deeper: List every link.');
+});
+
+const creditStopped = {
+  success: true,
+  status: 'failed',
+  error: 'Agent reached max credits',
+  expiresAt: '2026-09-17T00:00:00.000Z',
+  creditsUsed: 25,
+  threadId: THREAD_ID,
+  threadTurn: 1,
+  stopReason: 'credit_limit_reached',
+  message: 'Only Acme was found.',
+  partial: { companies: [{ name: 'Acme' }] },
+  partialSchemaValid: false,
+};
+
+// POST /v2/agent starts the run; every GET poll returns `status`.
+function runThenPoll(statusResponse: Record<string, any>) {
+  responseFor = (body) =>
+    body
+      ? { success: true, id: RUN_ID, threadId: THREAD_ID, threadTurn: 1 }
+      : statusResponse;
+}
+
+it('does not report 0 credits for a refunded credit stop', async () => {
+  runThenPoll({ ...creditStopped, creditsUsed: 0 });
+  const result = await cli([
+    'agent',
+    'Find companies.',
+    '--max-credits',
+    '25',
+    '--wait',
+    '--poll-interval',
+    '0.01',
+  ]);
+  expect(result.code).toBe(1);
+  expect(result.stdout).toContain(
+    'Stopped at credit limit: the agent reached its credit limit before finishing.'
+  );
+  expect(result.stdout).not.toContain('used 0 credits');
+});
+
+it('returns the partial result when a waited run hits its credit limit', async () => {
+  runThenPoll(creditStopped);
+  const args = ['agent', 'Find companies.', '--max-credits', '25', '--wait'];
+  const json = await cli([...args, '--poll-interval', '0.01', '--json']);
+  expect(json.code).toBe(1);
+  expect(requests[0].body.maxCredits).toBe(25);
+  expect(JSON.parse(json.stdout)).toMatchObject({
+    success: false,
+    error: 'Agent reached max credits',
+    id: RUN_ID,
+    status: 'failed',
+    stopReason: 'credit_limit_reached',
+    partial: { companies: [{ name: 'Acme' }] },
+    partialSchemaValid: false,
+    message: 'Only Acme was found.',
+    threadId: THREAD_ID,
+    creditsUsed: 25,
+  });
+  expect(json.stderr).toContain('Stopped at credit limit');
+  expect(json.stderr).toContain('Only Acme was found.');
+  expect(json.stderr).toContain(`--thread ${THREAD_ID}`);
+  expect(json.stderr).toContain('--max-credits');
+
+  const readable = await cli([...args, '--poll-interval', '0.01']);
+  expect(readable.code).toBe(1);
+  expect(readable.stdout).toContain(
+    'Stopped at credit limit: the agent used 25 credits and reached its credit limit before finishing.'
+  );
+  expect(readable.stdout).toContain('Only Acme was found.');
+  expect(readable.stdout).toContain(
+    'Partial Result (incomplete, does not match schema):'
+  );
+  expect(readable.stdout).toContain('"name": "Acme"');
+  expect(readable.stdout).toContain(
+    `firecrawl agent "<follow-up prompt>" --thread ${THREAD_ID} --wait`
+  );
+  expect(readable.stdout).toContain('higher --max-credits');
+  // The notice is already part of the text on stdout, so stderr stays clear.
+  expect(readable.stderr).not.toContain('Stopped at credit limit');
+});
+
+it('writes a credit-stopped result to --output and points stderr at the file', async () => {
+  runThenPoll(creditStopped);
+  const dir = mkdtempSync(join(tmpdir(), 'agent-output-'));
+  const outputPath = join(dir, 'result.txt');
+  try {
+    const result = await cli([
+      'agent',
+      'Find companies.',
+      '--wait',
+      '--poll-interval',
+      '0.01',
+      '--output',
+      outputPath,
+    ]);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('Stopped at credit limit');
+    expect(result.stderr).toContain('Only Acme was found.');
+    expect(result.stderr).toContain(
+      `The partial result (incomplete, does not match schema) is in ${outputPath}.`
+    );
+    expect(result.stderr).toContain(`--thread ${THREAD_ID}`);
+    const written = readFileSync(outputPath, 'utf-8');
+    expect(written).toContain(
+      'Partial Result (incomplete, does not match schema):'
+    );
+    expect(written).toContain('"name": "Acme"');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it('flushes a large credit-stopped JSON result to a pipe before exiting 1', async () => {
+  const companies = Array.from({ length: 5000 }, (_, i) => ({
+    name: `Company ${i}`,
+    website: `https://company-${i}.example.com`,
+  }));
+  runThenPoll({ ...creditStopped, partial: { companies } });
+  const result = await cli([
+    'agent',
+    'Find companies.',
+    '--wait',
+    '--poll-interval',
+    '0.01',
+    '--json',
+  ]);
+  expect(result.code).toBe(1);
+  expect(result.stdout.length).toBeGreaterThan(200_000);
+  expect(JSON.parse(result.stdout).partial.companies).toHaveLength(5000);
+});
+
+it('explains a credit-limit stop that recovered no partial', async () => {
+  const { partial, partialSchemaValid, ...noPartial } = creditStopped;
+  runThenPoll(noPartial);
+  const result = await cli([
+    'agent',
+    'Find companies.',
+    '--wait',
+    '--poll-interval',
+    '0.01',
+  ]);
+  expect(result.code).toBe(1);
+  expect(result.stdout).toContain('Stopped at credit limit');
+  expect(result.stdout).toContain('No partial result was recovered.');
+  expect(result.stdout).not.toContain('Partial Result');
+});
+
+it('keeps other failed runs unchanged', async () => {
+  runThenPoll({
+    success: true,
+    status: 'failed',
+    error: 'Agent crashed',
+    expiresAt: '2026-09-17T00:00:00.000Z',
+  });
+  const result = await cli([
+    'agent',
+    'Find companies.',
+    '--wait',
+    '--poll-interval',
+    '0.01',
+    '--json',
+  ]);
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe('');
+  expect(result.stderr).toContain('Error: Agent crashed');
+  expect(result.stderr).not.toContain('credit limit');
+});
+
+it('shows the partial on a status check of a credit-stopped run', async () => {
+  response = { ...creditStopped, partialSchemaValid: true };
+  const json = await cli(['agent', RUN_ID, '--json']);
+  // A status check reports the run's state; failed runs exit 0 here as before.
+  expect(json.code).toBe(0);
+  expect(JSON.parse(json.stdout)).toMatchObject({
+    success: true,
+    status: 'failed',
+    stopReason: 'credit_limit_reached',
+    partial: { companies: [{ name: 'Acme' }] },
+    partialSchemaValid: true,
+  });
+  expect(json.stderr).toContain('Stopped at credit limit');
+
+  const readable = await cli(['agent', RUN_ID]);
+  expect(readable.stdout).toContain(
+    'Partial Result (incomplete, matches schema):'
+  );
+});
+
+it('shows partials and how to continue on a credit-stopped thread', async () => {
+  response = {
+    success: true,
+    thread: {
+      id: THREAD_ID,
+      createdAt: '2026-09-16T10:00:00.000Z',
+      updatedAt: '2026-09-16T10:05:00.000Z',
+      status: 'idle',
+      runs: [
+        {
+          id: RUN_ID,
+          turn: 1,
+          mode: 'extract',
+          prompt: 'Find companies.',
+          status: 'credit_limit_reached',
+          createdAt: '2026-09-16T10:00:00.000Z',
+          finishedAt: '2026-09-16T10:01:00.000Z',
+          creditsUsed: 25,
+          message: 'Only Acme was found.',
+          stopReason: 'credit_limit_reached',
+          partial: { companies: [{ name: 'Acme' }] },
+        },
+      ],
+    },
+  };
+  const json = await cli(['agent', 'thread', THREAD_ID, '--json']);
+  expect(json.code).toBe(0);
+  expect(JSON.parse(json.stdout)).toEqual(response);
+  // stdout stays pure JSON; the continuation hint goes to stderr.
+  expect(json.stderr).toContain('Turn 1 stopped at its credit limit.');
+  expect(json.stderr).toContain(`--thread ${THREAD_ID} --wait`);
+
+  const readable = await cli(['agent', 'thread', THREAD_ID]);
+  expect(readable.code).toBe(0);
+  expect(readable.stderr).not.toContain('stopped at its credit limit');
+  expect(readable.stdout).toContain('Turn 1 (extract) - credit_limit_reached');
+  expect(readable.stdout).toContain(
+    'Partial Result (incomplete): {"companies":[{"name":"Acme"}]}'
+  );
+  expect(readable.stdout).toContain('Turn 1 stopped at its credit limit.');
+  expect(readable.stdout).toContain(`--thread ${THREAD_ID} --wait`);
 });
 
 it('relays thread_busy conflicts when a turn is still running', async () => {
@@ -913,6 +1648,7 @@ it('lists a thread through the thread endpoint', async () => {
   expect(readable.stdout).toContain('Turn 1 (extract) - succeeded');
   expect(readable.stdout).toContain('Extract the page title.');
   expect(readable.stdout).toContain('"title":"Example Domain"');
+  expect(readable.stdout).not.toContain('credit limit');
 });
 
 it('fails clearly on an unknown thread', async () => {
@@ -968,5 +1704,316 @@ it('falls back to category browsing after an unknown provider, but preserves oth
     code: 'rate_limited',
   });
   expect((await cli(['list', 'shopping', '--json'])).code).toBe(1);
+  expect(requests).toHaveLength(1);
+});
+
+it('forwards explicit discovery detail and rejects unknown modes before requesting', async () => {
+  response = { success: true, data: { web: [], tools: [] } };
+  for (const detail of ['compact', 'summary', 'full']) {
+    const result = await cli([
+      'search',
+      'records',
+      '--tool-detail',
+      detail,
+      '--json',
+    ]);
+    expect(result.code).toBe(0);
+    expect(requests.at(-1)?.body.toolDetail).toBe(detail);
+  }
+  const count = requests.length;
+  expect(
+    (await cli(['search', 'records', '--tool-detail', 'invalid'])).code
+  ).not.toBe(0);
+  expect(requests).toHaveLength(count);
+});
+
+it('forwards URL scrape discovery detail and rejects invalid combinations locally', async () => {
+  response = { success: true, data: { markdown: 'Example', tools: [] } };
+  for (const detail of ['compact', 'summary', 'full']) {
+    const result = await cli([
+      'scrape',
+      'https://example.com',
+      '--domain-tools',
+      '--tool-detail',
+      detail,
+      '--json',
+    ]);
+    expect(result.code).toBe(0);
+    expect(requests.at(-1)?.body).toMatchObject({
+      url: 'https://example.com',
+      domainTools: true,
+      toolDetail: detail,
+    });
+  }
+  const count = requests.length;
+  for (const args of [
+    [
+      'scrape',
+      'https://example.com',
+      '--domain-tools',
+      '--tool-detail',
+      'invalid',
+    ],
+    [
+      'scrape',
+      '--alexandria',
+      'sample/records/search',
+      '--tool-detail',
+      'full',
+    ],
+    ['scrape', 'sample/records/search', '--tool-detail', 'summary'],
+  ])
+    expect((await cli(args)).code).not.toBe(0);
+  expect(requests).toHaveLength(count);
+});
+
+it('submits Alexandria session feedback without a job ID', async () => {
+  response = { success: true, feedbackId: 'feedback-1', creditsRefunded: 0 };
+  const result = await cli([
+    'alexandria',
+    'feedback',
+    '--rating',
+    'partial',
+    '--url',
+    'https://example.com',
+    '--requested-functionality',
+    'Download attachments',
+    '--objective',
+    ' Compare contract requirements across agencies ',
+    '--rationale',
+    'Only summaries available',
+    '--json',
+  ]);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout).feedbackId).toBe('feedback-1');
+  expect(requests[0].url).toBe('/v2/feedback');
+  expect(requests[0].body).toEqual({
+    endpoint: 'alexandria',
+    rating: 'partial',
+    origin: 'cli',
+    integration: 'cli',
+    requestedWebsite: {
+      url: 'https://example.com',
+      requestedFunctionality: 'Download attachments',
+    },
+    objective: 'Compare contract requirements across agencies',
+    rationale: 'Only summaries available',
+  });
+});
+
+it('rejects missing session requirements before sending feedback', async () => {
+  const result = await cli(['alexandria', 'feedback', '--rating', 'good']);
+  expect(result.code).not.toBe(0);
+  expect(requests).toHaveLength(0);
+});
+
+const sessionFeedbackArgs = [
+  'alexandria',
+  'feedback',
+  '--rating',
+  'partial',
+  '--url',
+  'https://example.com',
+  '--requested-functionality',
+  'Get attachments',
+  '--objective',
+  'Compare contract requirements',
+  '--rationale',
+  'Missing documents',
+];
+
+it('sends session feedback without an objective', async () => {
+  response = { success: true, feedbackId: 'feedback-1', creditsRefunded: 0 };
+  const index = sessionFeedbackArgs.indexOf('--objective');
+  const withoutObjective = sessionFeedbackArgs.filter(
+    (_, i) => i !== index && i !== index + 1
+  );
+  expect((await cli(withoutObjective)).code).toBe(0);
+  expect(requests).toHaveLength(1);
+  expect(requests[0].body).not.toHaveProperty('objective');
+});
+
+it('rejects a blank objective before sending feedback', async () => {
+  const blank = [...sessionFeedbackArgs];
+  blank[sessionFeedbackArgs.indexOf('--objective') + 1] = '   ';
+  expect((await cli(blank)).code).not.toBe(0);
+  expect(requests).toHaveLength(0);
+});
+
+it('honors the child feedback API key before root authentication', async () => {
+  const result = await cli(
+    [
+      ...sessionFeedbackArgs,
+      '--api-key',
+      'fc-child-key',
+      '--api-url',
+      'https://api.firecrawl.dev',
+    ],
+    '',
+    { FIRECRAWL_NO_ENDPOINT_FEEDBACK: '1' }
+  );
+  expect(result.code).toBe(0);
+  expect(requests).toHaveLength(0);
+  expect(result.stdout + result.stderr).not.toMatch(
+    /not authenticated|log in|login required/i
+  );
+});
+
+it.each([
+  ['--provider-feedback', [{}]],
+  [
+    '--provider-feedback',
+    [{ name: 'example', issue: 'unknown', why: 'Missing records' }],
+  ],
+  ['--provider-feedback', [{ name: 'example', issue: 'other', why: '   ' }]],
+  [
+    '--capability-feedback',
+    [
+      {
+        name: 'attachments',
+        provider: 'example',
+        issue: 'new_capability_request',
+        why: 'Need documents',
+      },
+    ],
+  ],
+  [
+    '--capability-feedback',
+    [{ name: 'attachments', issue: 'execution_error', why: 'Timeout' }],
+  ],
+  [
+    '--capability-feedback',
+    [
+      {
+        name: 'attachments',
+        provider: 'example',
+        issue: 'unknown_issue',
+        why: 'Not a real code',
+      },
+    ],
+  ],
+])('rejects malformed %s before posting', async (flag, entries) => {
+  const result = await cli([
+    ...sessionFeedbackArgs,
+    String(flag),
+    JSON.stringify(entries),
+  ]);
+  expect(result.code).not.toBe(0);
+  expect(requests).toHaveLength(0);
+});
+
+it('normalizes and sends valid provider and capability feedback', async () => {
+  response = {
+    success: true,
+    feedbackId: 'feedback-valid',
+    creditsRefunded: 0,
+  };
+  const provider = [
+    {
+      name: ' example ',
+      issue: 'insufficient_coverage',
+      why: ' Missing documents ',
+    },
+  ];
+  const capability = [
+    {
+      name: 'attachments',
+      provider: 'example',
+      issue: 'new_capability_request',
+      why: 'Need documents',
+      requestedFunctionality: ' Download attachments ',
+    },
+  ];
+  const result = await cli([
+    ...sessionFeedbackArgs,
+    '--provider-feedback',
+    JSON.stringify(provider),
+    '--capability-feedback',
+    JSON.stringify(capability),
+  ]);
+  expect(result.code).toBe(0);
+  expect(requests[0].body.providerFeedback[0]).toEqual({
+    name: 'example',
+    issue: 'insufficient_coverage',
+    why: 'Missing documents',
+  });
+  expect(requests[0].body.capabilityFeedback[0].requestedFunctionality).toBe(
+    'Download attachments'
+  );
+});
+
+it('sends missing_capability feedback without requestedFunctionality', async () => {
+  response = {
+    success: true,
+    feedbackId: 'feedback-missing-capability',
+    creditsRefunded: 0,
+  };
+  const capability = [
+    {
+      name: 'attachments',
+      provider: 'example',
+      issue: 'missing_capability',
+      why: 'Provider has no attachment endpoint',
+    },
+  ];
+  const result = await cli([
+    ...sessionFeedbackArgs,
+    '--capability-feedback',
+    JSON.stringify(capability),
+  ]);
+  expect(result.code).toBe(0);
+  expect(requests).toHaveLength(1);
+  expect(requests[0].body.capabilityFeedback).toEqual(capability);
+});
+
+it('displays nested SQL cost while preserving the free outer receipt', async () => {
+  response = {
+    success: true,
+    scrape_id: 'sql-outer',
+    data: {
+      creditsCost: 0,
+      alexandria: [
+        {
+          provider: 'firecrawl',
+          capability: 'sql',
+          creditsCost: 0,
+          data: {
+            kind: 'result',
+            creditsCost: 110,
+            rows: [],
+            receipt: {
+              creditsUsed: 110,
+              requestId: 'inner-request',
+              operationId: 'inner-scrape',
+              operationType: 'scrape',
+            },
+          },
+        },
+      ],
+    },
+  };
+  const result = await cli([
+    'scrape',
+    '--alexandria',
+    'firecrawl/sql',
+    '--options',
+    JSON.stringify({
+      query: 'SELECT * FROM "similarweb/web/traffic" LIMIT 1',
+      execute: true,
+    }),
+    '--json',
+  ]);
+  expect(result.code).toBe(0);
+  expect(result.stderr).toContain(
+    'Credits: 110 (0 outer request + 110 separately billed provider calls)'
+  );
+  const output = JSON.parse(result.stdout);
+  expect(output.receipt).toMatchObject({
+    creditsUsed: 0,
+    separatelyBilledCredits: 110,
+  });
+  expect(output.data.alexandria[0].data.receipt).toEqual(
+    (response as any).data.alexandria[0].data.receipt
+  );
   expect(requests).toHaveLength(1);
 });

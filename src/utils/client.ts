@@ -29,6 +29,17 @@ export function isKeylessMode(apiKey?: string, apiUrl?: string): boolean {
   return !getApiKey(apiKey) && !isCustomApiUrl(apiUrl);
 }
 
+/**
+ * Headers for keyless requests. The API reads X-Origin to attribute keyless
+ * use, and a keyless prompt's signup link, to the CLI; requests without a body
+ * (GET research and developer lookups, interact stop) carry nothing else.
+ * Keyless error messages are printed as the API sends them: their
+ * firecrawl.dev/k/<id> link already resolves to CLI attribution.
+ */
+export const KEYLESS_CLI_HEADERS: Readonly<Record<string, string>> = {
+  'X-Origin': 'cli',
+};
+
 export async function keylessRequest(
   path: string,
   body: Record<string, unknown>
@@ -36,7 +47,7 @@ export async function keylessRequest(
   const apiUrl = (getConfig().apiUrl || DEFAULT_API_URL).replace(/\/$/, '');
   const response = await fetch(`${apiUrl}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...KEYLESS_CLI_HEADERS },
     body: JSON.stringify(body),
   });
   const json: any = await response.json().catch(() => ({}));
@@ -52,7 +63,7 @@ export async function keylessGet(path: string): Promise<any> {
   const apiUrl = (getConfig().apiUrl || DEFAULT_API_URL).replace(/\/$/, '');
   const response = await fetch(`${apiUrl}${path}`, {
     method: 'GET',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...KEYLESS_CLI_HEADERS },
   });
   const json: any = await response.json().catch(() => ({}));
   if (!response.ok) {

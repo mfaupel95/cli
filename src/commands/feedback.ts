@@ -13,8 +13,13 @@ import {
 export type EndpointFeedbackEndpoint = 'search' | 'scrape' | 'parse' | 'map';
 
 export interface EndpointFeedbackOptions {
-  endpoint: EndpointFeedbackEndpoint;
-  jobId: string;
+  endpoint: EndpointFeedbackEndpoint | 'alexandria';
+  jobId?: string;
+  requestedWebsite?: { url: string; requestedFunctionality: string };
+  rationale?: string;
+  objective?: string;
+  providerFeedback?: Record<string, unknown>[];
+  capabilityFeedback?: Record<string, unknown>[];
   rating: SearchFeedbackRating;
   issues?: string[];
   tags?: string[];
@@ -51,6 +56,7 @@ export interface EndpointFeedbackResult {
   creditsRefundedToday?: number;
   dailyRefundCap?: number;
   dailyCapReached?: boolean;
+  websiteCapReached?: boolean;
   alreadySubmitted?: boolean;
   warning?: string;
   error?: string;
@@ -250,23 +256,35 @@ export async function executeEndpointFeedback(
 
     const body: Record<string, unknown> = {
       endpoint: options.endpoint,
-      jobId: options.jobId,
+      ...(options.endpoint === 'alexandria' ? {} : { jobId: options.jobId }),
       rating: options.rating,
       origin: 'cli',
       integration: 'cli',
     };
 
-    const entries: Array<[string, unknown]> = [
-      ['issues', normalizeList(options.issues)],
-      ['tags', normalizeList(options.tags)],
-      ['note', options.note],
-      ['valuableSources', options.valuableSources],
-      ['missingContent', options.missingContent],
-      ['querySuggestions', options.querySuggestions],
-      ['url', options.url],
-      ['pageNumbers', options.pageNumbers],
-      ['metadata', options.metadata],
-    ];
+    if (options.endpoint !== 'alexandria' && !options.jobId) {
+      throw new Error('Job feedback requires a job ID.');
+    }
+    const entries: Array<[string, unknown]> =
+      options.endpoint === 'alexandria'
+        ? [
+            ['requestedWebsite', options.requestedWebsite],
+            ['rationale', options.rationale],
+            ['objective', options.objective],
+            ['providerFeedback', options.providerFeedback],
+            ['capabilityFeedback', options.capabilityFeedback],
+          ]
+        : [
+            ['issues', normalizeList(options.issues)],
+            ['tags', normalizeList(options.tags)],
+            ['note', options.note],
+            ['valuableSources', options.valuableSources],
+            ['missingContent', options.missingContent],
+            ['querySuggestions', options.querySuggestions],
+            ['url', options.url],
+            ['pageNumbers', options.pageNumbers],
+            ['metadata', options.metadata],
+          ];
 
     for (const [key, value] of entries) {
       if (value === undefined) continue;
@@ -329,6 +347,7 @@ export async function executeEndpointFeedback(
           ? data.dailyRefundCap
           : undefined,
       dailyCapReached: data.dailyCapReached === true,
+      ...(data.websiteCapReached === true ? { websiteCapReached: true } : {}),
       alreadySubmitted: data.alreadySubmitted,
       warning: data.warning,
     };
@@ -362,6 +381,10 @@ function formatReadable(result: EndpointFeedbackResult): string {
   if (result.dailyCapReached) {
     lines.push(
       'Daily refund cap reached; further feedback calls today will not refund credits.'
+    );
+  } else if (result.websiteCapReached) {
+    lines.push(
+      'Daily refund cap reached for this website; feedback about other websites can still refund credits.'
     );
   }
   if (result.warning) {
@@ -414,6 +437,7 @@ export async function handleEndpointFeedbackCommand(
         ? { dailyRefundCap: result.dailyRefundCap }
         : {}),
       ...(result.dailyCapReached ? { dailyCapReached: true } : {}),
+      ...(result.websiteCapReached ? { websiteCapReached: true } : {}),
       ...(result.alreadySubmitted ? { alreadySubmitted: true } : {}),
       ...(result.warning ? { warning: result.warning } : {}),
     };
